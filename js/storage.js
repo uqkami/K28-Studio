@@ -2,10 +2,11 @@
 // Single source of truth for all data access (individual mode only).
 
 const DB_NAME = "k28";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const PROFILE_STORE = "profiles";
 const IMAGE_STORE = "images";
 const IMAGE_REFS_STORE = "imageRefs";
+const PAGE_STORE = "pages";
 
 // ── Open / Initialize ──
 
@@ -13,17 +14,44 @@ function openDB() {
     return new Promise((resolve, reject) => {
         const req = indexedDB.open(DB_NAME, DB_VERSION);
         req.onupgradeneeded = () => {
-            const db = req.result;
-            if (!db.objectStoreNames.contains(PROFILE_STORE)) {
-                db.createObjectStore(PROFILE_STORE);
-            }
-            if (!db.objectStoreNames.contains(IMAGE_STORE)) {
-                db.createObjectStore(IMAGE_STORE);
-            }
-            if (!db.objectStoreNames.contains(IMAGE_REFS_STORE)) {
-                db.createObjectStore(IMAGE_REFS_STORE);
-            }
-        };
+                const db = req.result;
+                if (!db.objectStoreNames.contains(PROFILE_STORE)) {
+                    db.createObjectStore(PROFILE_STORE);
+                }
+                if (!db.objectStoreNames.contains(IMAGE_STORE)) {
+                    db.createObjectStore(IMAGE_STORE);
+                }
+                if (!db.objectStoreNames.contains(IMAGE_REFS_STORE)) {
+                    db.createObjectStore(IMAGE_REFS_STORE);
+                }
+                if (!db.objectStoreNames.contains(PAGE_STORE)) {
+                    db.createObjectStore(PAGE_STORE);
+                }
+                // Migrate from v2 (imageRefs) → v3 (pages)
+                const oldVersion = req.oldVersion;
+                if (oldVersion < 3 && db.objectStoreNames.contains(IMAGE_REFS_STORE)) {
+                    const tx = req.transaction;
+                    const oldStore = tx.objectStore(IMAGE_REFS_STORE);
+                    const pageStore = tx.objectStore(PAGE_STORE);
+                    const reqGetAll = oldStore.getAll();
+                    reqGetAll.onsuccess = () => {
+                        const items = reqGetAll.result || [];
+                        for (const item of items) {
+                            const parsed = JSON.parse(item);
+                            if (parsed.imageIds && parsed.imageIds.length > 0) {
+                                // Create a single page with the legacy images
+                                const page = {
+                                    id: 'legacy',
+                                    title: '',
+                                    content: '',
+                                    imageIds: parsed.imageIds
+                                };
+                                pageStore.put(JSON.stringify([page]), parsed.slotKey);
+                            }
+                        }
+                    };
+                }
+            };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
     });
@@ -223,4 +251,57 @@ function extToMime(ext) {
         "bmp": "image/bmp",
     };
     return map[ext.toLowerCase()] || "application/octet-stream";
+}
+
+// ── Pages (replaces imageRefs) ──
+
+async function loadPages(db) {
+    const tx = db.transaction(PAGE_STORE, "readonly");
+    const store = tx.objectStore(PAGE_STORE);
+    return new Promise((resolve, reject) => {
+        const req = store.openCursor();
+        const pages = {};
+        req.onsuccess = () => {
+            const cursor = req.result;
+            if (cursor) {
+                try {
+                    const parsed = JSON.parse(cursor.value);
+                    if (Array.isArray(parsed)) {
+                        pages[cursor.key] = parsed;
+                    }
+                } catch (e) {
+                    console.warn("Failed to parse pages for", cursor.key, e);
+                }
+                cursor.continue();
+            } else {
+                resolve(pages);
+            }
+        };
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function savePages(db, pages) {
+    const tx = db.transaction(PAGE_STORE, "readwrite");
+    const store = tx.objectStore(PAGE_STORE);
+    store.clear();
+    for (const [slotKey, pageArr] of Object.entries(pages)) {
+        if (pageArr.length > 0) {
+            store.put(JSON.stringify(pageArr), slotKey);
+        }
+    }
+    await new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function clearPages(db) {
+    const tx = db.transaction(PAGE_STORE, "readwrite");
+    const store = tx.objectStore(PAGE_STORE);
+    store.clear();
+    await new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
 }

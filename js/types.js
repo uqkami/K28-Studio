@@ -12,5 +12,10 @@ function createProfile(slotKey, name, description, mode) {
     if (mode !== "Windows") {
         bindings[HARDWARE_LOCK_KEY] = HARDWARE_LOCK_VALUE;
     }
-    return { slotKey, name, description, imageIds: [], bindings };
+    return { slotKey, name, description, bindings };
+}
+
+// Page: { id, title, content (markdown), imageIds }
+function createPage(id, title, content) {
+    return { id, title, content, imageIds: [] };
 }
