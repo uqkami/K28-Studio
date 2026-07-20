@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>K28 Studio — Keyboard Controller Profile Manager</title>
+    <link rel="stylesheet" href="css/main.css" />
+    <!-- JSZip for import/export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+    <div class="app-shell">
+        <div class="panel">
+            <!-- Toolbar -->
+            <div id="toolbar" class="topbar"></div>
+
+            <!-- Keyboard area -->
+            <div class="keyboard-wrap" aria-label="Keyboard controller layout">
+                <div id="keyboard-content" class="keyboard-content"></div>
+            </div>
+
+            <!-- Context menu -->
+            <div id="menu-container"></div>
+        </div>
+
+        <!-- Collage section -->
+        <div id="collage-container"></div>
+
+        <!-- Hidden file inputs -->
+        <input id="import-zip-input" type="file" accept=".k28profiles,application/zip" style="display:none" />
+        <input id="import-bindings-input" type="file" accept=".k28binding,application/json" style="display:none" />
+
+        <!-- Modal container (lightbox + all modals) -->
+        <div id="modal-container"></div>
+
+        <!-- Toast notifications -->
+        <div id="toast-container"></div>
+
+        <!-- Processing overlay -->
+        <div id="processing-container"></div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/types.js"></script>
+    <script src="js/data.js"></script>
+    <script src="js/storage.js"></script>
+    <script src="js/export.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

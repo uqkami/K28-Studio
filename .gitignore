@@ -1,0 +1,9 @@
+/target
+k28-server/target
+data/
+.DS_Store
+*.swp
+*.swo
+*~
+ToDo.md
+*.log

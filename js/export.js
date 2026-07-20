@@ -1,0 +1,168 @@
+// ── ZIP Import / Export ──
+
+const MAX_IMPORT_SIZE = 50 * 1024 * 1024;
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+
+// ── Export ──
+
+async function exportProfiles(db, profiles, imageRefs) {
+    // Strip empty MACRO_KEY bindings
+    const cleaned = {};
+    for (const [key, profile] of Object.entries(profiles)) {
+        const p = JSON.parse(JSON.stringify(profile));
+        if (p.bindings[MACRO_KEY] === "") {
+            delete p.bindings[MACRO_KEY];
+        }
+        // Assign imageIds from the SSoT (allImageRefs)
+        p.imageIds = imageRefs && imageRefs[key] ? [...imageRefs[key]] : [];
+        cleaned[key] = p;
+    }
+
+    // Strip profiles identical to compile-time defaults
+    const defaults = loadDefaultProfiles();
+    for (const key of Object.keys(cleaned)) {
+        if (defaults[key] && deepEqual(cleaned[key], defaults[key])) {
+            delete cleaned[key];
+        }
+    }
+
+    const zip = new JSZip();
+
+    // Write manifest.json
+    zip.file("manifest.json", JSON.stringify(cleaned, null, 2));
+
+    // Write images — collect unique IDs across all exported profiles
+    const processedIds = new Set();
+    for (const profile of Object.values(cleaned)) {
+        for (const imgId of profile.imageIds) {
+            if (processedIds.has(imgId)) continue;
+            processedIds.add(imgId);
+            try {
+                const blob = await getImage(db, imgId);
+                if (blob) {
+                    const ext = mimeToExt(blob.type);
+                    const bytes = await blobToArrayBuffer(blob);
+                    zip.file("images/" + imgId + ext, bytes);
+                }
+            } catch (e) {
+                console.warn("Failed to read image", imgId, e);
+            }
+        }
+    }
+
+    // Generate ZIP
+    const content = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+
+    // Trigger download
+    const filename = "k28_profiles_" + dateString() + ".k28profiles";
+    downloadBlob(new Blob([content], { type: "application/zip" }), filename);
+}
+
+// ── Export single bindings ──
+
+function exportBindings(profile) {
+    const json = JSON.stringify(profile.bindings, null, 2);
+    const filename = profile.slotKey + "_" + profile.name.replace(/[^a-zA-Z0-9_-]/g, "_") + "_bindings.k28binding";
+    downloadBlob(new Blob([json], { type: "application/json" }), filename);
+}
+
+function importBindings(data) {
+    const text = new TextDecoder().decode(data);
+    const bindings = JSON.parse(text);
+    if (typeof bindings !== "object" || Array.isArray(bindings) || bindings === null) {
+        throw new Error("Invalid bindings file: expected an object");
+    }
+    // Validate keys are strings
+    for (const key of Object.keys(bindings)) {
+        if (typeof bindings[key] !== "string") {
+            throw new Error("Invalid bindings file: binding values must be strings");
+        }
+    }
+    return bindings;
+}
+
+// ── Import ──
+
+async function importProfiles(db, data) {
+    if (data.byteLength > MAX_IMPORT_SIZE) {
+        throw new Error("Import file too large (" + data.byteLength + " bytes, max " + MAX_IMPORT_SIZE + " bytes)");
+    }
+
+    const zip = await JSZip.loadAsync(data);
+    let profiles = null;
+    const images = [];
+
+    for (const [name, entry] of Object.entries(zip.files)) {
+        if (entry.dir) continue;
+
+        const content = await entry.async("uint8array");
+
+        if (name === "manifest.json") {
+            const text = new TextDecoder().decode(content);
+            const parsed = JSON.parse(text);
+
+            // Validate
+            for (const [key, profile] of Object.entries(parsed)) {
+                if (typeof key !== "string" || key.trim() === "") {
+                    throw new Error("manifest.json contains a profile with an empty slot key");
+                }
+                if (typeof profile.name !== "string" || profile.name.trim() === "") {
+                    throw new Error("Profile '" + key + "' has an empty name");
+                }
+                if (typeof profile.slotKey !== "string" || profile.slotKey.trim() === "") {
+                    throw new Error("Profile '" + key + "' has an empty slot_key field");
+                }
+            }
+            profiles = parsed;
+        } else if (name.startsWith("images/")) {
+            if (content.byteLength > MAX_IMAGE_SIZE) {
+                throw new Error("Image entry '" + name + "' is too large (" + content.byteLength + " bytes, max " + MAX_IMAGE_SIZE + " bytes)");
+            }
+            const rest = name.slice("images/".length);
+            const dotIdx = rest.lastIndexOf(".");
+            const uuidStr = dotIdx >= 0 ? rest.slice(0, dotIdx) : rest;
+            const ext = dotIdx >= 0 ? rest.slice(dotIdx + 1) : "";
+            const mime = extToMime(ext);
+            images.push({ id: uuidStr, bytes: content, mime: mime });
+        }
+    }
+
+    if (!profiles) {
+        throw new Error("manifest.json not found in archive");
+    }
+
+    for (const img of images) {
+        const blob = new Blob([img.bytes], { type: img.mime });
+        await putImage(db, img.id, blob);
+    }
+
+    return profiles;
+}
+
+// ── Helpers ──
+
+function blobToArrayBuffer(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(new Uint8Array(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(blob);
+    });
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function dateString() {
+    return new Date().toISOString().split("T")[0] || "export";
+}
+
+function deepEqual(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+}
