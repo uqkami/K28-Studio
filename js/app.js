@@ -63,6 +63,22 @@ function isUserSlot(key) {
     return key in state.userProfiles;
 }
 
+function hasUserData(slotKey) {
+    const profile = state.userProfiles[slotKey];
+    if (!profile) return false;
+    const def = defaultsSnapshot[slotKey];
+    // Preset slots have no compile-time default to compare — if user
+    // stored a profile for it, that's user data.
+    if (!def) return true;
+    // Custom slots: only user data if it differs from the empty default.
+    return !deepEqual(profile, def);
+}
+
+function hasPages(slotKey) {
+    const pages = state.allPages[slotKey];
+    return pages && pages.length > 0;
+}
+
 // ── Hardware lock helpers (single source of truth for the lock key rule) ──
 
 function isLockKey(keyId, slotKey) {
@@ -231,6 +247,26 @@ function renderKeyboard() {
                 sn.className = "slot-name";
                 sn.textContent = slotName;
                 btn.appendChild(sn);
+
+                // Dot indicator — three states
+                const hasCustom = hasUserData(keyId);
+                const hasSlotPages = hasPages(keyId);
+                if (hasCustom && hasSlotPages) {
+                    const ud = document.createElement("span");
+                    ud.className = "user-data-dot has-both";
+                    ud.title = "Custom profile + pages";
+                    btn.appendChild(ud);
+                } else if (hasCustom) {
+                    const ud = document.createElement("span");
+                    ud.className = "user-data-dot";
+                    ud.title = "Custom profile data";
+                    btn.appendChild(ud);
+                } else if (hasSlotPages) {
+                    const ud = document.createElement("span");
+                    ud.className = "user-data-dot pages-only";
+                    ud.title = "Pages attached";
+                    btn.appendChild(ud);
+                }
 
                 const dl = document.createElement("div");
                 dl.className = "detail-label";

@@ -59,7 +59,7 @@ async function exportProfiles(db, profiles, pages) {
     const content = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 
     // Trigger download
-    const filename = "k28_profiles_" + dateString() + ".k28profiles";
+    const filename = dateString() + ".k28profiles";
     downloadBlob(new Blob([content], { type: "application/zip" }), filename);
 }
 
@@ -67,7 +67,7 @@ async function exportProfiles(db, profiles, pages) {
 
 function exportBindings(profile) {
     const json = JSON.stringify(profile.bindings, null, 2);
-    const filename = profile.slotKey + "_" + profile.name.replace(/[^a-zA-Z0-9_-]/g, "_") + "_bindings.k28binding";
+    const filename = profile.slotKey + "_" + profile.name.replace(/[^a-zA-Z0-9_-]/g, "_") + ".k28binding";
     downloadBlob(new Blob([json], { type: "application/json" }), filename);
 }
 
