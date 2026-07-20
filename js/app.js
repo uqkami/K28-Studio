@@ -17,6 +17,7 @@ const state = {
     addModal: null,          // { slotKey, name, description } or null
     renameModal: null,       // { slotKey, value, mode } or null
     confirmModal: null,      // { message, action } or null
+    viewingPage: null,        // { page, slotKey, editing } or null
     showSettings: false,
     showProfileSettings: false,
     expandedImage: null,     // URL string or null
@@ -25,7 +26,7 @@ const state = {
     imageUrls: {},           // UUID → object URL
     copyMode: null,          // null = off, 'select' = selecting source, string = source key
     toastTimer: null,
-    allImageRefs: {},        // slotKey → imageIds[] — SSoT for image associations (all profiles incl. presets)
+    allPages: {},             // slotKey → Page[] — replaces allImageRefs
 };
 
 // Compile-time data
@@ -452,6 +453,7 @@ function renderToolbar() {
             state.editMode = false;
             state.editingKey = null;
             state.menu = null;
+            state.viewingPage = null;
             fullRender();
         });
         toolbar.appendChild(backBtn);
@@ -839,20 +841,26 @@ function buildSettingsBtn(text, onclick, danger) {
 }
 
 // ============================================================================
-// Collage
+// Pages (Collage)
 // ============================================================================
 
 function renderCollage() {
     const container = document.getElementById("collage-container");
     if (!container) return;
+
+    // If viewing/editing a page, defer to renderPageViewer instead
+    if (state.viewingPage) {
+        renderPageViewer();
+        return;
+    }
+
     container.innerHTML = "";
 
     const act = activeProfile();
     if (!act) return;
 
-    // Image IDs from the SSoT: allImageRefs
-    const imageIds = state.allImageRefs[act.slotKey] || [];
-    const imagesLen = imageIds.length;
+    const pages = state.allPages[act.slotKey] || [];
+    const pagesLen = pages.length;
 
     const collage = document.createElement("div");
     collage.className = "collage";
@@ -860,46 +868,334 @@ function renderCollage() {
     const header = document.createElement("div");
     header.className = "collage-header";
     const span = document.createElement("span");
-    span.textContent = "Reference images (" + imagesLen + ")";
+    span.textContent = "Pages (" + pagesLen + ")";
     header.appendChild(span);
 
-    const label = document.createElement("label");
-    label.className = "collage-add-btn";
-    label.setAttribute("for", "collage-upload-input");
-    label.textContent = "+ Add images";
-    header.appendChild(label);
-
-    const fileInput = document.createElement("input");
-    fileInput.id = "collage-upload-input";
-    fileInput.type = "file";
-    fileInput.accept = "image/*";
-    fileInput.multiple = true;
-    fileInput.style.display = "none";
-    fileInput.addEventListener("change", handleCollageUpload);
-    header.appendChild(fileInput);
+    const addBtn = document.createElement("button");
+    addBtn.className = "collage-add-btn";
+    addBtn.textContent = "+ Add page";
+    addBtn.addEventListener("click", () => {
+        const page = createPage(generateId(), "", "");
+        state.viewingPage = { page, slotKey: act.slotKey, editing: true, isNew: true };
+        renderPageViewer();
+    });
+    header.appendChild(addBtn);
 
     collage.appendChild(header);
 
-    // Grid
-    if (imageIds.length === 0) {
+    if (pages.length === 0) {
         const empty = document.createElement("div");
         empty.className = "collage-empty";
-        empty.textContent = "No images yet. Upload in-game screenshots to reference your controller mappings.";
+        empty.textContent = "No pages yet. Add a note with images to reference your controller mappings.";
         collage.appendChild(empty);
     } else {
         const grid = document.createElement("div");
         grid.className = "collage-grid";
-        for (const imgId of imageIds) {
+        for (const page of pages) {
+            const item = document.createElement("div");
+            item.className = "collage-item page-card";
+            item.addEventListener("click", () => {
+                state.viewingPage = { page, slotKey: act.slotKey, editing: false };
+                renderPageViewer();
+            });
+
+            const preview = document.createElement("div");
+            preview.className = "page-card-preview";
+
+            const titleEl = document.createElement("div");
+            titleEl.className = "page-card-title";
+            titleEl.textContent = page.title || "Untitled";
+            preview.appendChild(titleEl);
+
+            // Show first ~100 chars of content as preview
+            const contentPreview = document.createElement("div");
+            contentPreview.className = "page-card-content";
+            const plainText = (page.content || "")
+                .replace(/^#{1,6}\s+/gm, "")
+                .replace(/[*_~`>|\-\[\]()!]/g, "")
+                .replace(/\n+/g, " ")
+                .trim();
+            contentPreview.textContent = plainText.slice(0, 120) + (plainText.length > 120 ? "…" : "");
+            if (!plainText) {
+                contentPreview.textContent = "(empty note)";
+                contentPreview.style.opacity = "0.4";
+            }
+            preview.appendChild(contentPreview);
+
+            item.appendChild(preview);
+
+            // Image indicators
+            const imgIds = page.imageIds || [];
+            if (imgIds.length > 0) {
+                const imgStrip = document.createElement("div");
+                imgStrip.className = "page-card-images";
+                const maxShow = Math.min(imgIds.length, 4);
+                for (let i = 0; i < maxShow; i++) {
+                    const url = state.imageUrls[imgIds[i]];
+                    if (!url) continue;
+                    const thumb = document.createElement("div");
+                    thumb.className = "page-card-thumb";
+                    thumb.style.backgroundImage = "url(" + url + ")";
+                    imgStrip.appendChild(thumb);
+                }
+                if (imgIds.length > 4) {
+                    const more = document.createElement("div");
+                    more.className = "page-card-thumb page-card-thumb-more";
+                    more.textContent = "+" + (imgIds.length - 4);
+                    imgStrip.appendChild(more);
+                }
+                item.appendChild(imgStrip);
+            }
+
+            grid.appendChild(item);
+        }
+        collage.appendChild(grid);
+    }
+
+    container.appendChild(collage);
+}
+
+// ── Page Viewer / Editor ──
+
+function renderPageViewer() {
+    const container = document.getElementById("collage-container");
+    if (!container) return;
+
+    const vp = state.viewingPage;
+    if (!vp) {
+        // When viewingPage is cleared, render the normal collage list
+        const savedVp = state.viewingPage;
+        state.viewingPage = null;
+        renderCollage();
+        state.viewingPage = savedVp;
+        return;
+    }
+
+    container.innerHTML = "";
+
+    const viewer = document.createElement("div");
+    viewer.className = "page-viewer";
+
+    // Top bar
+    const topBar = document.createElement("div");
+    topBar.className = "page-viewer-topbar";
+
+    const backBtn = document.createElement("button");
+    backBtn.className = "collage-add-btn";
+    backBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 18-6-6 6-6"/></svg>';
+    backBtn.addEventListener("click", () => {
+        // If editing and dirty, discard
+        state.viewingPage = null;
+        renderPageViewer();
+    });
+    topBar.appendChild(backBtn);
+
+
+    if (!vp.editing) {
+        const editBtn = document.createElement("button");
+        editBtn.className = "collage-add-btn";
+                editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg> Edit';
+        editBtn.addEventListener("click", () => {
+            state.viewingPage.editing = true;
+            renderPageViewer();
+        });
+        topBar.appendChild(editBtn);
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "collage-add-btn";
+        delBtn.style.cssText = "color: #fca5a5; border-color: rgba(252,165,165,0.25);";
+        delBtn.textContent = "✕ Delete";
+        delBtn.addEventListener("click", () => {
+            const slotKey = vp.slotKey;
+            const pages = state.allPages[slotKey] || [];
+            state.allPages[slotKey] = pages.filter(p => p.id !== vp.page.id);
+            // Clean up image URLs
+            for (const imgId of (vp.page.imageIds || [])) {
+                if (state.imageUrls[imgId]) {
+                    URL.revokeObjectURL(state.imageUrls[imgId]);
+                }
+                delete state.imageUrls[imgId];
+            }
+            scheduleAutosave();
+            state.viewingPage = null;
+            renderPageViewer();
+        });
+        topBar.appendChild(delBtn);
+    }
+
+    viewer.appendChild(topBar);
+
+    if (vp.editing) {
+        // Editor mode — split layout on wide screens
+        viewer.appendChild(buildPageEditor(vp));
+    } else {
+        // Viewer mode — render markdown content and images
+        viewer.appendChild(buildPageDisplay(vp));
+    }
+
+    container.appendChild(viewer);
+}
+
+function buildPageDisplay(vp) {
+    const wrap = document.createElement("div");
+    wrap.className = "page-display-wrap";
+
+    const contentArea = document.createElement("div");
+    contentArea.className = "page-content";
+
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "page-content-body markdown-body";
+
+    const title = vp.page.title || "Untitled";
+    const fullMd = "# " + title + "\n\n" + (vp.page.content || "");
+    if (fullMd.trim()) {
+        try {
+            bodyEl.innerHTML = marked.parse(fullMd);
+        } catch (e) {
+            bodyEl.textContent = fullMd;
+        }
+    } else {
+        const empty = document.createElement("p");
+        empty.style.cssText = "color: rgba(255,255,255,0.4); font-style: italic;";
+        empty.textContent = "(empty note)";
+        bodyEl.appendChild(empty);
+    }
+    contentArea.appendChild(bodyEl);
+
+    wrap.appendChild(contentArea);
+
+    // Image gallery at the bottom — reuse collage styling
+    const imgIds = vp.page.imageIds || [];
+    if (imgIds.length > 0) {
+        const imgSection = document.createElement("div");
+        imgSection.className = "page-images";
+
+        const imgHeader = document.createElement("div");
+        imgHeader.className = "collage-header";
+        const imgSpan = document.createElement("span");
+        imgSpan.textContent = "Images (" + imgIds.length + ")";
+        imgHeader.appendChild(imgSpan);
+        imgSection.appendChild(imgHeader);
+
+        const imgGrid = document.createElement("div");
+        imgGrid.className = "collage-grid";
+        for (const imgId of imgIds) {
             const url = state.imageUrls[imgId];
             if (!url) continue;
-
             const item = document.createElement("div");
             item.className = "collage-item";
             item.addEventListener("click", () => {
                 state.expandedImage = url;
                 renderModals();
             });
+            const img = document.createElement("div");
+            img.className = "collage-img";
+            img.style.backgroundImage = "url(" + url + ")";
+            item.appendChild(img);
+            imgGrid.appendChild(item);
+        }
+        imgSection.appendChild(imgGrid);
+        wrap.appendChild(imgSection);
+    }
 
+    return wrap;
+}
+
+function buildPageEditor(vp) {
+    const wrap = document.createElement("div");
+    wrap.className = (window.innerWidth >= 900) ? "page-editor-wrap split" : "page-editor-wrap";
+
+    const editorPane = document.createElement("div");
+    editorPane.className = "page-editor-pane";
+
+    const titleInput = document.createElement("input");
+    titleInput.className = "page-editor-title";
+    titleInput.value = vp.page.title || "";
+    titleInput.placeholder = "Page title…";
+    titleInput.addEventListener("input", () => {
+        vp.page.title = titleInput.value;
+        // Update live preview if split
+        const previewBody = wrap.querySelector(".page-preview-body");
+        const previewTitle = wrap.querySelector(".page-preview-pane-title");
+        if (previewBody && textarea.value) {
+            try {
+                previewBody.innerHTML = marked.parse(textarea.value);
+            } catch (e) {
+                previewBody.textContent = textarea.value;
+            }
+        } else if (previewBody) {
+            previewBody.innerHTML = "";
+        }
+        if (previewTitle) {
+            previewTitle.textContent = titleInput.value || "Untitled";
+        }
+        // Update top bar title
+        const tt = wrap.closest(".page-viewer")?.querySelector(".page-viewer-title");
+        if (tt) tt.textContent = titleInput.value || "New Page";
+    });
+    editorPane.appendChild(titleInput);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "page-editor-textarea";
+    textarea.value = vp.page.content || "";
+    textarea.placeholder = "Write your note in markdown…";
+    textarea.addEventListener("input", () => {
+        vp.page.content = textarea.value;
+        // Update live preview if split
+        const previewBody = wrap.querySelector(".page-preview-body");
+        if (previewBody) {
+            if (textarea.value) {
+                try {
+                    previewBody.innerHTML = marked.parse(textarea.value);
+                } catch (e) {
+                    previewBody.textContent = textarea.value;
+                }
+            } else {
+                previewBody.innerHTML = "";
+            }
+        }
+    });
+    editorPane.appendChild(textarea);
+
+    // Image attachment area — reuse collage styling
+    const imgSection = document.createElement("div");
+    imgSection.className = "page-editor-images";
+
+    const imgHeader = document.createElement("div");
+    imgHeader.className = "collage-header";
+    const imgSpan = document.createElement("span");
+    const imgIds = vp.page.imageIds || [];
+    imgSpan.textContent = "Attached images (" + imgIds.length + ")";
+    imgHeader.appendChild(imgSpan);
+
+    const addImgLabel = document.createElement("label");
+    addImgLabel.className = "collage-add-btn";
+    addImgLabel.textContent = "+ Add images";
+    addImgLabel.setAttribute("for", "page-img-input-" + vp.page.id);
+    imgHeader.appendChild(addImgLabel);
+
+    const imgFileInput = document.createElement("input");
+    imgFileInput.id = "page-img-input-" + vp.page.id;
+    imgFileInput.type = "file";
+    imgFileInput.accept = "image/*";
+    imgFileInput.multiple = true;
+    imgFileInput.style.display = "none";
+    imgFileInput.addEventListener("change", async (e) => {
+        await handlePageImageUpload(e, vp);
+        renderPageViewer();
+    });
+    imgHeader.appendChild(imgFileInput);
+
+    imgSection.appendChild(imgHeader);
+
+    if (imgIds.length > 0) {
+        const imgGrid = document.createElement("div");
+        imgGrid.className = "collage-grid";
+        for (const imgId of imgIds) {
+            const url = state.imageUrls[imgId];
+            if (!url) continue;
+            const item = document.createElement("div");
+            item.className = "collage-item";
             const img = document.createElement("div");
             img.className = "collage-img";
             img.style.backgroundImage = "url(" + url + ")";
@@ -910,16 +1206,144 @@ function renderCollage() {
             delBtn.textContent = "✕";
             delBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                deleteImageHandler(act.slotKey, imgId);
+                // Remove image from page
+                vp.page.imageIds = (vp.page.imageIds || []).filter(id => id !== imgId);
+                if (state.imageUrls[imgId]) {
+                    URL.revokeObjectURL(state.imageUrls[imgId]);
+                }
+                delete state.imageUrls[imgId];
+                // Also delete from DB
+                if (state.db) {
+                    deleteImage(state.db, imgId).catch(console.warn);
+                }
+                scheduleAutosave();
+                renderPageViewer();
             });
             item.appendChild(delBtn);
-
-            grid.appendChild(item);
+            imgGrid.appendChild(item);
         }
-        collage.appendChild(grid);
+        imgSection.appendChild(imgGrid);
+    } else {
+        const empty = document.createElement("div");
+        empty.className = "collage-empty";
+        empty.textContent = "No images attached.";
+        imgSection.appendChild(empty);
+    }
+    editorPane.appendChild(imgSection);
+
+    // Save / Cancel buttons
+    const actionRow = document.createElement("div");
+    actionRow.className = "page-editor-actions";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "collage-add-btn";
+    saveBtn.style.cssText = "background: rgba(16,185,129,0.2); border-color: rgba(16,185,129,0.3); color: #6ee7b7;";
+    saveBtn.textContent = "Save";
+    saveBtn.addEventListener("click", () => {
+        saveCurrentPage(vp);
+    });
+    actionRow.appendChild(saveBtn);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "collage-add-btn";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", () => {
+        // If it was a new page, discard
+        if (vp.isNew) {
+            state.viewingPage = null;
+            renderPageViewer();
+        } else {
+            // Reload the page from stored data to discard edits
+            state.viewingPage.editing = false;
+            // Reload page data from state
+            const pages = state.allPages[vp.slotKey] || [];
+            const reloaded = pages.find(p => p.id === vp.page.id);
+            if (reloaded) {
+                state.viewingPage.page = reloaded;
+            }
+            renderPageViewer();
+        }
+    });
+    actionRow.appendChild(cancelBtn);
+
+    editorPane.appendChild(actionRow);
+
+    wrap.appendChild(editorPane);
+
+    // Preview pane for split layout
+    if (window.innerWidth >= 900) {
+        const previewPane = document.createElement("div");
+        previewPane.className = "page-preview-pane";
+
+        const previewTitle = document.createElement("h2");
+        previewTitle.className = "page-preview-pane-title";
+        previewTitle.textContent = vp.page.title || "Untitled";
+        previewPane.appendChild(previewTitle);
+
+        const previewBody = document.createElement("div");
+        previewBody.className = "page-preview-body markdown-body";
+        if (vp.page.content) {
+            try {
+                previewBody.innerHTML = marked.parse(vp.page.content);
+            } catch (e) {
+                previewBody.textContent = vp.page.content;
+            }
+        }
+        previewPane.appendChild(previewBody);
+
+        wrap.appendChild(previewPane);
     }
 
-    container.appendChild(collage);
+    return wrap;
+}
+
+function saveCurrentPage(vp) {
+    const slotKey = vp.slotKey;
+    if (!state.allPages[slotKey]) {
+        state.allPages[slotKey] = [];
+    }
+    const pages = state.allPages[slotKey];
+    const idx = pages.findIndex(p => p.id === vp.page.id);
+    if (idx >= 0) {
+        pages[idx] = vp.page;
+    } else {
+        pages.push(vp.page);
+    }
+    scheduleAutosave();
+    state.viewingPage = { page: vp.page, slotKey, editing: false };
+    renderPageViewer();
+}
+
+async function handlePageImageUpload(e, vp) {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+
+    const db = state.db;
+    if (!db) return;
+
+    let count = 0;
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+            const imgId = generateId();
+            await putImage(db, imgId, file);
+            const url = URL.createObjectURL(file);
+            state.imageUrls[imgId] = url;
+            if (!vp.page.imageIds) {
+                vp.page.imageIds = [];
+            }
+            vp.page.imageIds.push(imgId);
+            count++;
+        } catch (err) {
+            console.warn("Failed to store image:", err);
+            showToast("Failed to store image: " + err.message, false);
+        }
+    }
+    if (count > 0) {
+        scheduleAutosave();
+        showToast("Added " + count + " image" + (count > 1 ? "s" : "") + ".", true);
+    }
+    e.target.value = "";
 }
 
 // ============================================================================
@@ -1112,8 +1536,17 @@ function submitRename() {
 function confirmAction(action) {
     if (action.type === "DeleteProfile") {
         delete state.userProfiles[action.slotKey];
-        // Clean up image refs for the deleted profile
-        delete state.allImageRefs[action.slotKey];
+        // Clean up pages for the deleted profile
+        const oldPages = state.allPages[action.slotKey] || [];
+        for (const page of oldPages) {
+            for (const imgId of (page.imageIds || [])) {
+                if (state.imageUrls[imgId]) {
+                    URL.revokeObjectURL(state.imageUrls[imgId]);
+                }
+                delete state.imageUrls[imgId];
+            }
+        }
+        delete state.allPages[action.slotKey];
         if (state.activeProfileKey === action.slotKey) {
             state.activeProfileKey = null;
             state.editMode = false;
@@ -1131,15 +1564,21 @@ function confirmAction(action) {
         scheduleAutosave();
     } else if (action.type === "ResetAll") {
         state.userProfiles = {};
-        state.allImageRefs = {};
+        // Revoke all image URLs
+        for (const url of Object.values(state.imageUrls)) {
+            URL.revokeObjectURL(url);
+        }
+        state.imageUrls = {};
+        state.allPages = {};
         state.activeProfileKey = null;
         state.editMode = false;
         state.editingKey = null;
         state.menu = null;
         state.showSettings = false;
+        state.viewingPage = null;
         if (state.db) {
             clearProfiles(state.db).catch(console.warn);
-            saveImageRefs(state.db, {}).catch(console.warn);
+            clearPages(state.db).catch(console.warn);
         }
     }
     state.confirmModal = null;
@@ -1157,57 +1596,6 @@ function generateId() {
     }
 }
 
-async function handleCollageUpload(e) {
-    const files = e.target.files;
-    if (!files || !files.length) return;
-    const slotKey = state.activeProfileKey;
-    if (!slotKey) return;
-
-    const db = state.db;
-    if (!db) return;
-
-    let count = 0;
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        try {
-            const imgId = generateId();
-            await putImage(db, imgId, file);
-            const url = URL.createObjectURL(file);
-            state.imageUrls[imgId] = url;
-            if (!state.allImageRefs[slotKey]) {
-                state.allImageRefs[slotKey] = [];
-            }
-            state.allImageRefs[slotKey].push(imgId);
-            count++;
-        } catch (err) {
-            console.warn("Failed to store image:", err);
-            showToast("Failed to store image: " + err.message, false);
-        }
-    }
-    if (count > 0) {
-        scheduleAutosave();
-        renderCollage();
-        showToast("Added " + count + " image" + (count > 1 ? "s" : "") + ".", true);
-    }
-    e.target.value = "";
-}
-
-function deleteImageHandler(slotKey, imgId) {
-    const url = state.imageUrls[imgId];
-    if (url) {
-        URL.revokeObjectURL(url);
-    }
-    delete state.imageUrls[imgId];
-    if (state.allImageRefs[slotKey]) {
-        state.allImageRefs[slotKey] = state.allImageRefs[slotKey].filter(id => id !== imgId);
-    }
-    if (state.db) {
-        deleteImage(state.db, imgId).catch(console.warn);
-    }
-    scheduleAutosave();
-    renderCollage();
-}
-
 // ── Import / Export ──
 
 async function handleExport() {
@@ -1216,7 +1604,7 @@ async function handleExport() {
     state.processing = true;
     renderProcessing();
     try {
-        await exportProfiles(db, state.userProfiles, state.allImageRefs);
+        await exportProfiles(db, state.userProfiles, state.allPages);
         state.showSettings = false;
         showToast("Profiles exported.", true);
     } catch (e) {
@@ -1239,7 +1627,9 @@ async function handleImport(e) {
     try {
         const buf = await file.arrayBuffer();
         const data = new Uint8Array(buf);
-        const loaded = await importProfiles(db, data);
+        const result = await importProfiles(db, data);
+        const loaded = result.profiles;
+        const importedPages = result.pages || {};
 
         // Revoke all existing image URLs
         for (const url of Object.values(state.imageUrls)) {
@@ -1251,21 +1641,21 @@ async function handleImport(e) {
         delete loaded[MACRO_KEY];
         for (const p of Object.values(loaded)) {
             p.bindings[MACRO_KEY] = "";
-        ensureLockBinding(p);
+            ensureLockBinding(p);
+            // Strip legacy imageIds if any
+            delete p.imageIds;
         }
 
-        // Populate allImageRefs from imported profiles
-        for (const [key, profile] of Object.entries(loaded)) {
-            if (profile.imageIds && profile.imageIds.length > 0) {
-                state.allImageRefs[key] = [...profile.imageIds];
-            }
-        }
+        // Load pages
+        state.allPages = importedPages;
 
-        // Load fresh URLs for imported images
+        // Load fresh URLs for images referenced in pages
         const allSeen = new Set();
-        for (const ids of Object.values(state.allImageRefs)) {
-            for (const imgId of ids) {
-                allSeen.add(imgId);
+        for (const pageArr of Object.values(state.allPages)) {
+            for (const page of pageArr) {
+                for (const imgId of (page.imageIds || [])) {
+                    allSeen.add(imgId);
+                }
             }
         }
         for (const imgId of allSeen) {
@@ -1352,8 +1742,8 @@ async function doAutosave() {
     if (!state.db || !state.loaded) return;
 
     try {
-        // Save image refs regardless — they may have changed for preset profiles
-        await saveImageRefs(state.db, state.allImageRefs);
+        // Save pages
+        await savePages(state.db, state.allPages);
         // Only save profiles if they differ from compile-time defaults
         if (!deepEqual(state.userProfiles, defaultsSnapshot)) {
             await saveProfiles(state.db, state.userProfiles);
@@ -1398,15 +1788,17 @@ async function init() {
         state.userProfiles = profiles;
     }
 
-    // Load allImageRefs (SSoT for image associations across all profiles incl. presets)
-    const refs = await loadImageRefs(db);
-    state.allImageRefs = refs;
+    // Load pages
+    const pages = await loadPages(db);
+    state.allPages = pages;
 
-    // Load image URLs — gather all referenced image IDs
+    // Load image URLs — gather all referenced image IDs from pages
     const allReferencedIds = new Set();
-    for (const ids of Object.values(refs)) {
-        for (const id of ids) {
-            allReferencedIds.add(id);
+    for (const pageArr of Object.values(pages)) {
+        for (const page of pageArr) {
+            for (const imgId of (page.imageIds || [])) {
+                allReferencedIds.add(imgId);
+            }
         }
     }
     for (const imgId of allReferencedIds) {
