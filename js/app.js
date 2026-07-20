@@ -17,7 +17,6 @@ const state = {
     addModal: null,          // { slotKey, name, description } or null
     renameModal: null,       // { slotKey, value, mode } or null
     confirmModal: null,      // { message, action } or null
-    viewingPage: null,        // { page, slotKey, editing } or null
     showSettings: false,
     showProfileSettings: false,
     expandedImage: null,     // URL string or null
@@ -26,7 +25,7 @@ const state = {
     imageUrls: {},           // UUID → object URL
     copyMode: null,          // null = off, 'select' = selecting source, string = source key
     toastTimer: null,
-    allPages: {},             // slotKey → Page[] — replaces allImageRefs
+    allImageRefs: {},        // slotKey → imageIds[] — SSoT for image associations (all profiles incl. presets)
 };
 
 // Compile-time data
@@ -55,7 +54,6 @@ function activeProfile() {
 }
 
 function isActivePreset() {
-    if (PRESETS_EDITABLE) return false;
     if (!state.activeProfileKey) return false;
     return !state.userProfiles[state.activeProfileKey] && !!presetProfiles[state.activeProfileKey];
 }
@@ -64,43 +62,16 @@ function isUserSlot(key) {
     return key in state.userProfiles;
 }
 
-/** If the active profile is still a preset, promote it into userProfiles so edits persist. */
-function ensureActiveProfileEditable() {
-    const ak = state.activeProfileKey;
-    if (!ak || state.userProfiles[ak]) return;
-    const preset = presetProfiles[ak];
-    if (!preset) return;
-    state.userProfiles[ak] = JSON.parse(JSON.stringify(preset));
-}
-
-function hasUserData(slotKey) {
-    const profile = state.userProfiles[slotKey];
-    if (!profile) return false;
-    const def = defaultsSnapshot[slotKey];
-    // Preset slots have no compile-time default to compare — if user
-    // stored a profile for it, that's user data.
-    if (!def) return true;
-    // Custom slots: only user data if it differs from the empty default.
-    return !deepEqual(profile, def);
-}
-
-function hasPages(slotKey) {
-    const pages = state.allPages[slotKey];
-    return pages && pages.length > 0;
-}
-
 // ── Hardware lock helpers (single source of truth for the lock key rule) ──
 
-function lockKeyForSlot(slotKey) {
-    return lockKeyForMode(modeForSlot(slotKey));
-}
-
 function isLockKey(keyId, slotKey) {
-    return keyId === lockKeyForSlot(slotKey);
+    return keyId === HARDWARE_LOCK_KEY && modeForSlot(slotKey) !== "Windows";
 }
 
 function ensureLockBinding(profile) {
-    profile.bindings[lockKeyForSlot(profile.slotKey)] = HARDWARE_LOCK_VALUE;
+    if (modeForSlot(profile.slotKey) !== "Windows") {
+        profile.bindings[HARDWARE_LOCK_KEY] = HARDWARE_LOCK_VALUE;
+    }
 }
 
 // ============================================================================
@@ -165,7 +136,6 @@ function renderKeyboard() {
             input.className = "inline-edit";
             input.value = activeProfile().bindings[keyId] || "";
             input.addEventListener("input", (e) => {
-                ensureActiveProfileEditable();
                 const val = e.target.value;
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
@@ -261,26 +231,6 @@ function renderKeyboard() {
                 sn.textContent = slotName;
                 btn.appendChild(sn);
 
-                // Dot indicator — three states
-                const hasCustom = hasUserData(keyId);
-                const hasSlotPages = hasPages(keyId);
-                if (hasCustom && hasSlotPages) {
-                    const ud = document.createElement("span");
-                    ud.className = "user-data-dot has-both";
-                    ud.title = "Custom profile + pages";
-                    btn.appendChild(ud);
-                } else if (hasCustom) {
-                    const ud = document.createElement("span");
-                    ud.className = "user-data-dot";
-                    ud.title = "Custom profile data";
-                    btn.appendChild(ud);
-                } else if (hasSlotPages) {
-                    const ud = document.createElement("span");
-                    ud.className = "user-data-dot pages-only";
-                    ud.title = "Pages attached";
-                    btn.appendChild(ud);
-                }
-
                 const dl = document.createElement("div");
                 dl.className = "detail-label";
                 dl.textContent = detailLabel;
@@ -328,7 +278,6 @@ function buildCenterContent() {
             nameInput.maxLength = MAX_PROFILE_NAME_LENGTH;
             nameInput.setAttribute("aria-label", "Profile name");
             nameInput.addEventListener("input", (e) => {
-                ensureActiveProfileEditable();
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
                     state.userProfiles[ak].name = e.target.value;
@@ -342,7 +291,6 @@ function buildCenterContent() {
             descInput.maxLength = MAX_DESCRIPTION_LENGTH;
             descInput.setAttribute("aria-label", "Profile description");
             descInput.addEventListener("input", (e) => {
-                ensureActiveProfileEditable();
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
                     state.userProfiles[ak].description = e.target.value;
@@ -504,7 +452,6 @@ function renderToolbar() {
             state.editMode = false;
             state.editingKey = null;
             state.menu = null;
-            state.viewingPage = null;
             fullRender();
         });
         toolbar.appendChild(backBtn);
@@ -573,7 +520,6 @@ function renderMenu() {
             }
             if (!isLockedKey) {
                 addMenuItem(menu, "Remove value", () => {
-                ensureActiveProfileEditable();
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
                     delete state.userProfiles[ak].bindings[keyId];
@@ -893,26 +839,20 @@ function buildSettingsBtn(text, onclick, danger) {
 }
 
 // ============================================================================
-// Pages (Collage)
+// Collage
 // ============================================================================
 
 function renderCollage() {
     const container = document.getElementById("collage-container");
     if (!container) return;
-
-    // If viewing/editing a page, defer to renderPageViewer instead
-    if (state.viewingPage) {
-        renderPageViewer();
-        return;
-    }
-
     container.innerHTML = "";
 
     const act = activeProfile();
     if (!act) return;
 
-    const pages = state.allPages[act.slotKey] || [];
-    const pagesLen = pages.length;
+    // Image IDs from the SSoT: allImageRefs
+    const imageIds = state.allImageRefs[act.slotKey] || [];
+    const imagesLen = imageIds.length;
 
     const collage = document.createElement("div");
     collage.className = "collage";
@@ -920,334 +860,46 @@ function renderCollage() {
     const header = document.createElement("div");
     header.className = "collage-header";
     const span = document.createElement("span");
-    span.textContent = "Pages (" + pagesLen + ")";
+    span.textContent = "Reference images (" + imagesLen + ")";
     header.appendChild(span);
 
-    const addBtn = document.createElement("button");
-    addBtn.className = "collage-add-btn";
-    addBtn.textContent = "+ Add page";
-    addBtn.addEventListener("click", () => {
-        const page = createPage(generateId("page_"), "", "");
-        state.viewingPage = { page, slotKey: act.slotKey, editing: true, isNew: true };
-        renderPageViewer();
-    });
-    header.appendChild(addBtn);
+    const label = document.createElement("label");
+    label.className = "collage-add-btn";
+    label.setAttribute("for", "collage-upload-input");
+    label.textContent = "+ Add images";
+    header.appendChild(label);
+
+    const fileInput = document.createElement("input");
+    fileInput.id = "collage-upload-input";
+    fileInput.type = "file";
+    fileInput.accept = "image/*";
+    fileInput.multiple = true;
+    fileInput.style.display = "none";
+    fileInput.addEventListener("change", handleCollageUpload);
+    header.appendChild(fileInput);
 
     collage.appendChild(header);
 
-    if (pages.length === 0) {
+    // Grid
+    if (imageIds.length === 0) {
         const empty = document.createElement("div");
         empty.className = "collage-empty";
-        empty.textContent = "No pages yet. Add a note with images to reference your controller mappings.";
+        empty.textContent = "No images yet. Upload in-game screenshots to reference your controller mappings.";
         collage.appendChild(empty);
     } else {
         const grid = document.createElement("div");
         grid.className = "collage-grid";
-        for (const page of pages) {
-            const item = document.createElement("div");
-            item.className = "collage-item page-card";
-            item.addEventListener("click", () => {
-                state.viewingPage = { page, slotKey: act.slotKey, editing: false };
-                renderPageViewer();
-            });
-
-            const preview = document.createElement("div");
-            preview.className = "page-card-preview";
-
-            const titleEl = document.createElement("div");
-            titleEl.className = "page-card-title";
-            titleEl.textContent = page.title || "Untitled";
-            preview.appendChild(titleEl);
-
-            // Show first ~100 chars of content as preview
-            const contentPreview = document.createElement("div");
-            contentPreview.className = "page-card-content";
-            const plainText = (page.content || "")
-                .replace(/^#{1,6}\s+/gm, "")
-                .replace(/[*_~`>|\-\[\]()!]/g, "")
-                .replace(/\n+/g, " ")
-                .trim();
-            contentPreview.textContent = plainText.slice(0, 120) + (plainText.length > 120 ? "…" : "");
-            if (!plainText) {
-                contentPreview.textContent = "(empty note)";
-                contentPreview.style.opacity = "0.4";
-            }
-            preview.appendChild(contentPreview);
-
-            item.appendChild(preview);
-
-            // Image indicators
-            const imgIds = page.imageIds || [];
-            if (imgIds.length > 0) {
-                const imgStrip = document.createElement("div");
-                imgStrip.className = "page-card-images";
-                const maxShow = Math.min(imgIds.length, 4);
-                for (let i = 0; i < maxShow; i++) {
-                    const url = state.imageUrls[imgIds[i]];
-                    if (!url) continue;
-                    const thumb = document.createElement("div");
-                    thumb.className = "page-card-thumb";
-                    thumb.style.backgroundImage = "url(" + url + ")";
-                    imgStrip.appendChild(thumb);
-                }
-                if (imgIds.length > 4) {
-                    const more = document.createElement("div");
-                    more.className = "page-card-thumb page-card-thumb-more";
-                    more.textContent = "+" + (imgIds.length - 4);
-                    imgStrip.appendChild(more);
-                }
-                item.appendChild(imgStrip);
-            }
-
-            grid.appendChild(item);
-        }
-        collage.appendChild(grid);
-    }
-
-    container.appendChild(collage);
-}
-
-// ── Page Viewer / Editor ──
-
-function renderPageViewer() {
-    const container = document.getElementById("collage-container");
-    if (!container) return;
-
-    const vp = state.viewingPage;
-    if (!vp) {
-        // When viewingPage is cleared, render the normal collage list
-        const savedVp = state.viewingPage;
-        state.viewingPage = null;
-        renderCollage();
-        state.viewingPage = savedVp;
-        return;
-    }
-
-    container.innerHTML = "";
-
-    const viewer = document.createElement("div");
-    viewer.className = "page-viewer";
-
-    // Top bar
-    const topBar = document.createElement("div");
-    topBar.className = "page-viewer-topbar";
-
-    const backBtn = document.createElement("button");
-    backBtn.className = "collage-add-btn";
-    backBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 18-6-6 6-6"/></svg>';
-    backBtn.addEventListener("click", () => {
-        // If editing and dirty, discard
-        state.viewingPage = null;
-        renderPageViewer();
-    });
-    topBar.appendChild(backBtn);
-
-
-    if (!vp.editing) {
-        const editBtn = document.createElement("button");
-        editBtn.className = "collage-add-btn";
-                editBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg> Edit';
-        editBtn.addEventListener("click", () => {
-            state.viewingPage.editing = true;
-            renderPageViewer();
-        });
-        topBar.appendChild(editBtn);
-
-        const delBtn = document.createElement("button");
-        delBtn.className = "collage-add-btn";
-        delBtn.style.cssText = "color: #fca5a5; border-color: rgba(252,165,165,0.25);";
-        delBtn.textContent = "✕ Delete";
-        delBtn.addEventListener("click", () => {
-            const slotKey = vp.slotKey;
-            const pages = state.allPages[slotKey] || [];
-            state.allPages[slotKey] = pages.filter(p => p.id !== vp.page.id);
-            // Clean up image URLs
-            for (const imgId of (vp.page.imageIds || [])) {
-                if (state.imageUrls[imgId]) {
-                    URL.revokeObjectURL(state.imageUrls[imgId]);
-                }
-                delete state.imageUrls[imgId];
-            }
-            scheduleAutosave();
-            state.viewingPage = null;
-            renderPageViewer();
-        });
-        topBar.appendChild(delBtn);
-    }
-
-    viewer.appendChild(topBar);
-
-    if (vp.editing) {
-        // Editor mode — split layout on wide screens
-        viewer.appendChild(buildPageEditor(vp));
-    } else {
-        // Viewer mode — render markdown content and images
-        viewer.appendChild(buildPageDisplay(vp));
-    }
-
-    container.appendChild(viewer);
-}
-
-function buildPageDisplay(vp) {
-    const wrap = document.createElement("div");
-    wrap.className = "page-display-wrap";
-
-    const contentArea = document.createElement("div");
-    contentArea.className = "page-content";
-
-    const bodyEl = document.createElement("div");
-    bodyEl.className = "page-content-body markdown-body";
-
-    const title = vp.page.title || "Untitled";
-    const fullMd = "# " + title + "\n\n" + (vp.page.content || "");
-    if (fullMd.trim()) {
-        try {
-            bodyEl.innerHTML = marked.parse(fullMd);
-        } catch (e) {
-            bodyEl.textContent = fullMd;
-        }
-    } else {
-        const empty = document.createElement("p");
-        empty.style.cssText = "color: rgba(255,255,255,0.4); font-style: italic;";
-        empty.textContent = "(empty note)";
-        bodyEl.appendChild(empty);
-    }
-    contentArea.appendChild(bodyEl);
-
-    wrap.appendChild(contentArea);
-
-    // Image gallery at the bottom — reuse collage styling
-    const imgIds = vp.page.imageIds || [];
-    if (imgIds.length > 0) {
-        const imgSection = document.createElement("div");
-        imgSection.className = "page-images";
-
-        const imgHeader = document.createElement("div");
-        imgHeader.className = "collage-header";
-        const imgSpan = document.createElement("span");
-        imgSpan.textContent = "Images (" + imgIds.length + ")";
-        imgHeader.appendChild(imgSpan);
-        imgSection.appendChild(imgHeader);
-
-        const imgGrid = document.createElement("div");
-        imgGrid.className = "collage-grid";
-        for (const imgId of imgIds) {
+        for (const imgId of imageIds) {
             const url = state.imageUrls[imgId];
             if (!url) continue;
+
             const item = document.createElement("div");
             item.className = "collage-item";
             item.addEventListener("click", () => {
                 state.expandedImage = url;
                 renderModals();
             });
-            const img = document.createElement("div");
-            img.className = "collage-img";
-            img.style.backgroundImage = "url(" + url + ")";
-            item.appendChild(img);
-            imgGrid.appendChild(item);
-        }
-        imgSection.appendChild(imgGrid);
-        wrap.appendChild(imgSection);
-    }
 
-    return wrap;
-}
-
-function buildPageEditor(vp) {
-    const wrap = document.createElement("div");
-    wrap.className = (window.innerWidth >= 900) ? "page-editor-wrap split" : "page-editor-wrap";
-
-    const editorPane = document.createElement("div");
-    editorPane.className = "page-editor-pane";
-
-    const titleInput = document.createElement("input");
-    titleInput.className = "page-editor-title";
-    titleInput.value = vp.page.title || "";
-    titleInput.placeholder = "Page title…";
-    titleInput.addEventListener("input", () => {
-        vp.page.title = titleInput.value;
-        // Update live preview if split
-        const previewBody = wrap.querySelector(".page-preview-body");
-        const previewTitle = wrap.querySelector(".page-preview-pane-title");
-        if (previewBody && textarea.value) {
-            try {
-                previewBody.innerHTML = marked.parse(textarea.value);
-            } catch (e) {
-                previewBody.textContent = textarea.value;
-            }
-        } else if (previewBody) {
-            previewBody.innerHTML = "";
-        }
-        if (previewTitle) {
-            previewTitle.textContent = titleInput.value || "Untitled";
-        }
-        // Update top bar title
-        const tt = wrap.closest(".page-viewer")?.querySelector(".page-viewer-title");
-        if (tt) tt.textContent = titleInput.value || "New Page";
-    });
-    editorPane.appendChild(titleInput);
-
-    const textarea = document.createElement("textarea");
-    textarea.className = "page-editor-textarea";
-    textarea.value = vp.page.content || "";
-    textarea.placeholder = "Write your note in markdown…";
-    textarea.addEventListener("input", () => {
-        vp.page.content = textarea.value;
-        // Update live preview if split
-        const previewBody = wrap.querySelector(".page-preview-body");
-        if (previewBody) {
-            if (textarea.value) {
-                try {
-                    previewBody.innerHTML = marked.parse(textarea.value);
-                } catch (e) {
-                    previewBody.textContent = textarea.value;
-                }
-            } else {
-                previewBody.innerHTML = "";
-            }
-        }
-    });
-    editorPane.appendChild(textarea);
-
-    // Image attachment area — reuse collage styling
-    const imgSection = document.createElement("div");
-    imgSection.className = "page-editor-images";
-
-    const imgHeader = document.createElement("div");
-    imgHeader.className = "collage-header";
-    const imgSpan = document.createElement("span");
-    const imgIds = vp.page.imageIds || [];
-    imgSpan.textContent = "Attached images (" + imgIds.length + ")";
-    imgHeader.appendChild(imgSpan);
-
-    const addImgLabel = document.createElement("label");
-    addImgLabel.className = "collage-add-btn";
-    addImgLabel.textContent = "+ Add images";
-    addImgLabel.setAttribute("for", "page-img-input-" + vp.page.id);
-    imgHeader.appendChild(addImgLabel);
-
-    const imgFileInput = document.createElement("input");
-    imgFileInput.id = "page-img-input-" + vp.page.id;
-    imgFileInput.type = "file";
-    imgFileInput.accept = "image/*";
-    imgFileInput.multiple = true;
-    imgFileInput.style.display = "none";
-    imgFileInput.addEventListener("change", async (e) => {
-        await handlePageImageUpload(e, vp);
-        renderPageViewer();
-    });
-    imgHeader.appendChild(imgFileInput);
-
-    imgSection.appendChild(imgHeader);
-
-    if (imgIds.length > 0) {
-        const imgGrid = document.createElement("div");
-        imgGrid.className = "collage-grid";
-        for (const imgId of imgIds) {
-            const url = state.imageUrls[imgId];
-            if (!url) continue;
-            const item = document.createElement("div");
-            item.className = "collage-item";
             const img = document.createElement("div");
             img.className = "collage-img";
             img.style.backgroundImage = "url(" + url + ")";
@@ -1258,144 +910,16 @@ function buildPageEditor(vp) {
             delBtn.textContent = "✕";
             delBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                // Remove image from page
-                vp.page.imageIds = (vp.page.imageIds || []).filter(id => id !== imgId);
-                if (state.imageUrls[imgId]) {
-                    URL.revokeObjectURL(state.imageUrls[imgId]);
-                }
-                delete state.imageUrls[imgId];
-                // Also delete from DB
-                if (state.db) {
-                    deleteImage(state.db, imgId).catch(console.warn);
-                }
-                scheduleAutosave();
-                renderPageViewer();
+                deleteImageHandler(act.slotKey, imgId);
             });
             item.appendChild(delBtn);
-            imgGrid.appendChild(item);
+
+            grid.appendChild(item);
         }
-        imgSection.appendChild(imgGrid);
-    } else {
-        const empty = document.createElement("div");
-        empty.className = "collage-empty";
-        empty.textContent = "No images attached.";
-        imgSection.appendChild(empty);
-    }
-    editorPane.appendChild(imgSection);
-
-    // Save / Cancel buttons
-    const actionRow = document.createElement("div");
-    actionRow.className = "page-editor-actions";
-
-    const saveBtn = document.createElement("button");
-    saveBtn.className = "collage-add-btn";
-    saveBtn.style.cssText = "background: rgba(16,185,129,0.2); border-color: rgba(16,185,129,0.3); color: #6ee7b7;";
-    saveBtn.textContent = "Save";
-    saveBtn.addEventListener("click", () => {
-        saveCurrentPage(vp);
-    });
-    actionRow.appendChild(saveBtn);
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "collage-add-btn";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", () => {
-        // If it was a new page, discard
-        if (vp.isNew) {
-            state.viewingPage = null;
-            renderPageViewer();
-        } else {
-            // Reload the page from stored data to discard edits
-            state.viewingPage.editing = false;
-            // Reload page data from state
-            const pages = state.allPages[vp.slotKey] || [];
-            const reloaded = pages.find(p => p.id === vp.page.id);
-            if (reloaded) {
-                state.viewingPage.page = reloaded;
-            }
-            renderPageViewer();
-        }
-    });
-    actionRow.appendChild(cancelBtn);
-
-    editorPane.appendChild(actionRow);
-
-    wrap.appendChild(editorPane);
-
-    // Preview pane for split layout
-    if (window.innerWidth >= 900) {
-        const previewPane = document.createElement("div");
-        previewPane.className = "page-preview-pane";
-
-        const previewTitle = document.createElement("h2");
-        previewTitle.className = "page-preview-pane-title";
-        previewTitle.textContent = vp.page.title || "Untitled";
-        previewPane.appendChild(previewTitle);
-
-        const previewBody = document.createElement("div");
-        previewBody.className = "page-preview-body markdown-body";
-        if (vp.page.content) {
-            try {
-                previewBody.innerHTML = marked.parse(vp.page.content);
-            } catch (e) {
-                previewBody.textContent = vp.page.content;
-            }
-        }
-        previewPane.appendChild(previewBody);
-
-        wrap.appendChild(previewPane);
+        collage.appendChild(grid);
     }
 
-    return wrap;
-}
-
-function saveCurrentPage(vp) {
-    const slotKey = vp.slotKey;
-    if (!state.allPages[slotKey]) {
-        state.allPages[slotKey] = [];
-    }
-    const pages = state.allPages[slotKey];
-    const idx = pages.findIndex(p => p.id === vp.page.id);
-    if (idx >= 0) {
-        pages[idx] = vp.page;
-    } else {
-        pages.push(vp.page);
-    }
-    scheduleAutosave();
-    state.viewingPage = { page: vp.page, slotKey, editing: false };
-    renderPageViewer();
-}
-
-async function handlePageImageUpload(e, vp) {
-    const files = e.target.files;
-    if (!files || !files.length) return;
-
-    const db = state.db;
-    if (!db) return;
-
-    let count = 0;
-    for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        try {
-            const imgId = generateId("img_");
-            await putImage(db, imgId, file);
-            const url = URL.createObjectURL(file);
-            state.imageUrls[imgId] = url;
-            if (!vp.page.imageIds) {
-                vp.page.imageIds = [];
-            }
-            vp.page.imageIds.push(imgId);
-            count++;
-        } catch (err) {
-            console.warn("Failed to store image:", err);
-            showToast("Failed to store image: " + err.message, false);
-        }
-    }
-    if (count > 0) {
-        scheduleAutosave();
-        showToast("Added " + count + " image" + (count > 1 ? "s" : "") + ".", true);
-    }
-    e.target.value = "";
+    container.appendChild(collage);
 }
 
 // ============================================================================
@@ -1588,17 +1112,8 @@ function submitRename() {
 function confirmAction(action) {
     if (action.type === "DeleteProfile") {
         delete state.userProfiles[action.slotKey];
-        // Clean up pages for the deleted profile
-        const oldPages = state.allPages[action.slotKey] || [];
-        for (const page of oldPages) {
-            for (const imgId of (page.imageIds || [])) {
-                if (state.imageUrls[imgId]) {
-                    URL.revokeObjectURL(state.imageUrls[imgId]);
-                }
-                delete state.imageUrls[imgId];
-            }
-        }
-        delete state.allPages[action.slotKey];
+        // Clean up image refs for the deleted profile
+        delete state.allImageRefs[action.slotKey];
         if (state.activeProfileKey === action.slotKey) {
             state.activeProfileKey = null;
             state.editMode = false;
@@ -1607,12 +1122,8 @@ function confirmAction(action) {
         }
         scheduleAutosave();
     } else if (action.type === "ClearBindings") {
-        if (state.userProfiles[action.slotKey] || presetProfiles[action.slotKey]) {
+        if (state.userProfiles[action.slotKey]) {
             const slotKey = action.slotKey;
-            // Promote if it's still a preset
-            if (!state.userProfiles[slotKey]) {
-                state.userProfiles[slotKey] = JSON.parse(JSON.stringify(presetProfiles[slotKey]));
-            }
             state.userProfiles[slotKey].bindings = {};
             // Always preserve the hardware lock on clear
             ensureLockBinding(state.userProfiles[slotKey]);
@@ -1620,21 +1131,15 @@ function confirmAction(action) {
         scheduleAutosave();
     } else if (action.type === "ResetAll") {
         state.userProfiles = {};
-        // Revoke all image URLs
-        for (const url of Object.values(state.imageUrls)) {
-            URL.revokeObjectURL(url);
-        }
-        state.imageUrls = {};
-        state.allPages = {};
+        state.allImageRefs = {};
         state.activeProfileKey = null;
         state.editMode = false;
         state.editingKey = null;
         state.menu = null;
         state.showSettings = false;
-        state.viewingPage = null;
         if (state.db) {
             clearProfiles(state.db).catch(console.warn);
-            clearPages(state.db).catch(console.warn);
+            saveImageRefs(state.db, {}).catch(console.warn);
         }
     }
     state.confirmModal = null;
@@ -1643,13 +1148,64 @@ function confirmAction(action) {
 
 // ── Image handling ──
 
-function generateId(prefix = "") {
+function generateId() {
     try {
         return crypto.randomUUID();
     } catch (_) {
         // Fallback for environments where crypto.randomUUID() isn't available
-        return prefix + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
+        return "img_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
     }
+}
+
+async function handleCollageUpload(e) {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+    const slotKey = state.activeProfileKey;
+    if (!slotKey) return;
+
+    const db = state.db;
+    if (!db) return;
+
+    let count = 0;
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+            const imgId = generateId();
+            await putImage(db, imgId, file);
+            const url = URL.createObjectURL(file);
+            state.imageUrls[imgId] = url;
+            if (!state.allImageRefs[slotKey]) {
+                state.allImageRefs[slotKey] = [];
+            }
+            state.allImageRefs[slotKey].push(imgId);
+            count++;
+        } catch (err) {
+            console.warn("Failed to store image:", err);
+            showToast("Failed to store image: " + err.message, false);
+        }
+    }
+    if (count > 0) {
+        scheduleAutosave();
+        renderCollage();
+        showToast("Added " + count + " image" + (count > 1 ? "s" : "") + ".", true);
+    }
+    e.target.value = "";
+}
+
+function deleteImageHandler(slotKey, imgId) {
+    const url = state.imageUrls[imgId];
+    if (url) {
+        URL.revokeObjectURL(url);
+    }
+    delete state.imageUrls[imgId];
+    if (state.allImageRefs[slotKey]) {
+        state.allImageRefs[slotKey] = state.allImageRefs[slotKey].filter(id => id !== imgId);
+    }
+    if (state.db) {
+        deleteImage(state.db, imgId).catch(console.warn);
+    }
+    scheduleAutosave();
+    renderCollage();
 }
 
 // ── Import / Export ──
@@ -1660,7 +1216,7 @@ async function handleExport() {
     state.processing = true;
     renderProcessing();
     try {
-        await exportProfiles(db, state.userProfiles, state.allPages);
+        await exportProfiles(db, state.userProfiles, state.allImageRefs);
         state.showSettings = false;
         showToast("Profiles exported.", true);
     } catch (e) {
@@ -1683,9 +1239,7 @@ async function handleImport(e) {
     try {
         const buf = await file.arrayBuffer();
         const data = new Uint8Array(buf);
-        const result = await importProfiles(db, data);
-        const loaded = result.profiles;
-        const importedPages = result.pages || {};
+        const loaded = await importProfiles(db, data);
 
         // Revoke all existing image URLs
         for (const url of Object.values(state.imageUrls)) {
@@ -1697,21 +1251,21 @@ async function handleImport(e) {
         delete loaded[MACRO_KEY];
         for (const p of Object.values(loaded)) {
             p.bindings[MACRO_KEY] = "";
-            ensureLockBinding(p);
-            // Strip legacy imageIds if any
-            delete p.imageIds;
+        ensureLockBinding(p);
         }
 
-        // Load pages
-        state.allPages = importedPages;
+        // Populate allImageRefs from imported profiles
+        for (const [key, profile] of Object.entries(loaded)) {
+            if (profile.imageIds && profile.imageIds.length > 0) {
+                state.allImageRefs[key] = [...profile.imageIds];
+            }
+        }
 
-        // Load fresh URLs for images referenced in pages
+        // Load fresh URLs for imported images
         const allSeen = new Set();
-        for (const pageArr of Object.values(state.allPages)) {
-            for (const page of pageArr) {
-                for (const imgId of (page.imageIds || [])) {
-                    allSeen.add(imgId);
-                }
+        for (const ids of Object.values(state.allImageRefs)) {
+            for (const imgId of ids) {
+                allSeen.add(imgId);
             }
         }
         for (const imgId of allSeen) {
@@ -1752,8 +1306,7 @@ async function handleImportBindings(e) {
         const data = new Uint8Array(buf);
         const bindings = importBindings(data);
         let count = 0;
-        if (state.userProfiles[ak] || presetProfiles[ak]) {
-            ensureActiveProfileEditable();
+        if (state.userProfiles[ak]) {
             for (const [k, v] of Object.entries(bindings)) {
                 if (v !== "") {
                     state.userProfiles[ak].bindings[k] = v;
@@ -1775,7 +1328,6 @@ async function handleImportBindings(e) {
 }
 
 function handleReset() {
-    state.showSettings = false;
     state.confirmModal = {
         message: "Reset all user profiles? This will delete your profiles and images. Preset profiles will remain. This cannot be undone.",
         action: { type: "ResetAll" }
@@ -1799,20 +1351,11 @@ async function doAutosave() {
     if (!state.db || !state.loaded) return;
 
     try {
-        // Save pages
-        await savePages(state.db, state.allPages);
-        // Only persist custom-slot profiles — presets are always derived from
-        // the compile-time PRESET_BINDINGS in data.js on every page load.
-        const customOnly = {};
-        for (const [key, profile] of Object.entries(state.userProfiles)) {
-            if (slotIsCustom(key)) {
-                customOnly[key] = profile;
-            }
-        }
-        if (!deepEqual(customOnly, defaultsSnapshot)) {
-            await saveProfiles(state.db, customOnly);
-        } else if (Object.keys(customOnly).length === 0) {
-            await clearProfiles(state.db);
+        // Save image refs regardless — they may have changed for preset profiles
+        await saveImageRefs(state.db, state.allImageRefs);
+        // Only save profiles if they differ from compile-time defaults
+        if (!deepEqual(state.userProfiles, defaultsSnapshot)) {
+            await saveProfiles(state.db, state.userProfiles);
         }
     } catch (e) {
         console.warn("Autosave failed:", e);
@@ -1844,14 +1387,6 @@ async function init() {
 
     // Load profiles
     const profiles = await loadProfiles(db);
-    // Strip any stale preset-slot profiles that may have been saved
-    // (from before presets were made properly immutable via autosave filtering).
-    // Presets are always derived from the compile-time PRESET_BINDINGS in data.js.
-    for (const key of Object.keys(profiles)) {
-        if (!slotIsCustom(key)) {
-            delete profiles[key];
-        }
-    }
     const defaults = loadDefaultProfiles();
     if (Object.keys(profiles).length === 0 || deepEqual(profiles, defaults)) {
         if (Object.keys(profiles).length > 0) {
@@ -1862,17 +1397,15 @@ async function init() {
         state.userProfiles = profiles;
     }
 
-    // Load pages
-    const pages = await loadPages(db);
-    state.allPages = pages;
+    // Load allImageRefs (SSoT for image associations across all profiles incl. presets)
+    const refs = await loadImageRefs(db);
+    state.allImageRefs = refs;
 
-    // Load image URLs — gather all referenced image IDs from pages
+    // Load image URLs — gather all referenced image IDs
     const allReferencedIds = new Set();
-    for (const pageArr of Object.values(pages)) {
-        for (const page of pageArr) {
-            for (const imgId of (page.imageIds || [])) {
-                allReferencedIds.add(imgId);
-            }
+    for (const ids of Object.values(refs)) {
+        for (const id of ids) {
+            allReferencedIds.add(id);
         }
     }
     for (const imgId of allReferencedIds) {

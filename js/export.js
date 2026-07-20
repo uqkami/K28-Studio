@@ -5,7 +5,7 @@ const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
 
 // ── Export ──
 
-async function exportProfiles(db, profiles, pages) {
+async function exportProfiles(db, profiles, imageRefs) {
     // Strip empty MACRO_KEY bindings
     const cleaned = {};
     for (const [key, profile] of Object.entries(profiles)) {
@@ -13,6 +13,8 @@ async function exportProfiles(db, profiles, pages) {
         if (p.bindings[MACRO_KEY] === "") {
             delete p.bindings[MACRO_KEY];
         }
+        // Assign imageIds from the SSoT (allImageRefs)
+        p.imageIds = imageRefs && imageRefs[key] ? [...imageRefs[key]] : [];
         cleaned[key] = p;
     }
 
@@ -26,31 +28,24 @@ async function exportProfiles(db, profiles, pages) {
 
     const zip = new JSZip();
 
-    // Write manifest.json (sorted by key)
-    zip.file("manifest.json", JSON.stringify(sortKeys(cleaned, true), null, 2));
+    // Write manifest.json
+    zip.file("manifest.json", JSON.stringify(cleaned, null, 2));
 
-    // Write pages.json
-    if (pages && Object.keys(pages).length > 0) {
-        zip.file("pages.json", JSON.stringify(pages, null, 2));
-    }
-
-    // Write images — collect unique IDs across all pages AND legacy profile.imageIds
+    // Write images — collect unique IDs across all exported profiles
     const processedIds = new Set();
-    for (const pageArr of Object.values(pages || {})) {
-        for (const page of pageArr) {
-            for (const imgId of (page.imageIds || [])) {
-                if (processedIds.has(imgId)) continue;
-                processedIds.add(imgId);
-                try {
-                    const blob = await getImage(db, imgId);
-                    if (blob) {
-                        const ext = mimeToExt(blob.type);
-                        const bytes = await blobToArrayBuffer(blob);
-                        zip.file("images/" + imgId + ext, bytes);
-                    }
-                } catch (e) {
-                    console.warn("Failed to read image", imgId, e);
+    for (const profile of Object.values(cleaned)) {
+        for (const imgId of profile.imageIds) {
+            if (processedIds.has(imgId)) continue;
+            processedIds.add(imgId);
+            try {
+                const blob = await getImage(db, imgId);
+                if (blob) {
+                    const ext = mimeToExt(blob.type);
+                    const bytes = await blobToArrayBuffer(blob);
+                    zip.file("images/" + imgId + ext, bytes);
                 }
+            } catch (e) {
+                console.warn("Failed to read image", imgId, e);
             }
         }
     }
@@ -59,16 +54,15 @@ async function exportProfiles(db, profiles, pages) {
     const content = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 
     // Trigger download
-    const filename = dateString() + ".k28profiles";
+    const filename = "k28_profiles_" + dateString() + ".k28profiles";
     downloadBlob(new Blob([content], { type: "application/zip" }), filename);
 }
 
 // ── Export single bindings ──
 
 function exportBindings(profile) {
-    const sorted = sortKeys(profile.bindings);
-    const json = JSON.stringify(sorted, null, 2);
-    const filename = profile.slotKey + "_" + profile.name.replace(/[^a-zA-Z0-9_-]/g, "_") + ".k28binding";
+    const json = JSON.stringify(profile.bindings, null, 2);
+    const filename = profile.slotKey + "_" + profile.name.replace(/[^a-zA-Z0-9_-]/g, "_") + "_bindings.k28binding";
     downloadBlob(new Blob([json], { type: "application/json" }), filename);
 }
 
@@ -96,7 +90,6 @@ async function importProfiles(db, data) {
 
     const zip = await JSZip.loadAsync(data);
     let profiles = null;
-    let importedPages = null;
     const images = [];
 
     for (const [name, entry] of Object.entries(zip.files)) {
@@ -119,13 +112,8 @@ async function importProfiles(db, data) {
                 if (typeof profile.slotKey !== "string" || profile.slotKey.trim() === "") {
                     throw new Error("Profile '" + key + "' has an empty slot_key field");
                 }
-                // Strip legacy imageIds from profile
-                delete profile.imageIds;
             }
             profiles = parsed;
-        } else if (name === "pages.json") {
-            const text = new TextDecoder().decode(content);
-            importedPages = JSON.parse(text);
         } else if (name.startsWith("images/")) {
             if (content.byteLength > MAX_IMAGE_SIZE) {
                 throw new Error("Image entry '" + name + "' is too large (" + content.byteLength + " bytes, max " + MAX_IMAGE_SIZE + " bytes)");
@@ -148,23 +136,10 @@ async function importProfiles(db, data) {
         await putImage(db, img.id, blob);
     }
 
-    return { profiles, pages: importedPages || {} };
+    return profiles;
 }
 
 // ── Helpers ──
-
-function sortKeys(obj, deep) {
-    if (obj === null || typeof obj !== "object") return obj;
-    if (Array.isArray(obj)) return obj.map(v => deep ? sortKeys(v, true) : v);
-    const sorted = {};
-    for (const key of Object.keys(obj).sort()) {
-        const val = obj[key];
-        sorted[key] = deep && typeof val === "object" && val !== null && !Array.isArray(val)
-            ? sortKeys(val, true)
-            : val;
-    }
-    return sorted;
-}
 
 function blobToArrayBuffer(blob) {
     return new Promise((resolve, reject) => {
@@ -185,11 +160,7 @@ function downloadBlob(blob, filename) {
 }
 
 function dateString() {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
+    return new Date().toISOString().split("T")[0] || "export";
 }
 
 function deepEqual(a, b) {
