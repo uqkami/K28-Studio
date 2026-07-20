@@ -1328,6 +1328,7 @@ async function handleImportBindings(e) {
 }
 
 function handleReset() {
+    state.showSettings = false;
     state.confirmModal = {
         message: "Reset all user profiles? This will delete your profiles and images. Preset profiles will remain. This cannot be undone.",
         action: { type: "ResetAll" }
