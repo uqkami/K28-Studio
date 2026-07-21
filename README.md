@@ -1,30 +1,13 @@
 # K28 Studio — Keyboard Controller Profile Manager
 
 A web-based profile manager for the **Gamo2 K28** keyboard controller. Build, edit, and organize key binding profiles entirely in your browser. No build step, no toolchain — just HTML, CSS, and vanilla JavaScript with IndexedDB for local storage.
+just HTML, CSS, and vanilla JavaScript with IndexedDB for local storage.
+
+![K28 Studio web interface](images/interface.png)
 
 ---
 
 ## Architecture
-
-```
-┌───────────────────────────────────────────┐
-│              Browser                      │
-│  ┌────────────────────────────────────┐   │
-│  │      K28 Frontend (HTML + JS)      │   │
-│  │                                    │   │
-│  │  ┌──────────┐  ┌───────────────┐   │   │
-│  │  │ Selector │  │  Profile      │   │   │
-│  │  │   View   │◄─►│  Editor      │   │   │
-│  │  └────┬─────┘  └──────┬────────┘   │   │
-│  │       │               │            │   │
-│  │       ▼               ▼            │   │
-│  │  ┌──────────────────────────────┐  │   │
-│  │  │     IndexedDB (local)        │  │   │
-│  │  │  profiles  │  images         │  │   │
-│  │  └──────────────────────────────┘  │   │
-│  └────────────────────────────────────┘   │
-└───────────────────────────────────────────┘
-```
 
 The entire app runs client-side. All profiles and images are stored in the browser's IndexedDB — no server required.
 
@@ -47,33 +30,11 @@ The entire app runs client-side. All profiles and images are stored in the brows
 
 ## Quick Start
 
-No dependencies required. Serve the directory with any static file server:
+No dependencies required. Open `index.html` in your browser.
 
-```bash
-cd k28
-python3 -m http.server 8080
-```
+> Make sure the entire `k28/` directory is preserved — `index.html` loads CSS, JS, and images from sibling folders. It won't work if you move just the HTML file somewhere else.
 
-Open [http://localhost:8080](http://localhost:8080).
-
-That's it. No build step, no npm install, no Rust toolchain. Edit a file and refresh the browser.
-
----
-
-## Project Structure
-
-```
-k28/
-├── index.html          ← Entry point
-├── css/main.css        ← All styles
-├── js/
-│   ├── types.js        ← Data model
-│   ├── data.js         ← Keyboard layout, slot defs, preset profiles
-│   ├── storage.js      ← IndexedDB persistence
-│   ├── export.js       ← ZIP import/export
-│   └── app.js          ← Main application logic
-└── README.md
-```
+That's it!
 
 ---
 
