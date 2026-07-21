@@ -55,12 +55,22 @@ function activeProfile() {
 }
 
 function isActivePreset() {
+    if (PRESETS_EDITABLE) return false;
     if (!state.activeProfileKey) return false;
     return !state.userProfiles[state.activeProfileKey] && !!presetProfiles[state.activeProfileKey];
 }
 
 function isUserSlot(key) {
     return key in state.userProfiles;
+}
+
+/** If the active profile is still a preset, promote it into userProfiles so edits persist. */
+function ensureActiveProfileEditable() {
+    const ak = state.activeProfileKey;
+    if (!ak || state.userProfiles[ak]) return;
+    const preset = presetProfiles[ak];
+    if (!preset) return;
+    state.userProfiles[ak] = JSON.parse(JSON.stringify(preset));
 }
 
 function hasUserData(slotKey) {
@@ -81,14 +91,16 @@ function hasPages(slotKey) {
 
 // ── Hardware lock helpers (single source of truth for the lock key rule) ──
 
+function lockKeyForSlot(slotKey) {
+    return lockKeyForMode(modeForSlot(slotKey));
+}
+
 function isLockKey(keyId, slotKey) {
-    return keyId === HARDWARE_LOCK_KEY && modeForSlot(slotKey) !== "Windows";
+    return keyId === lockKeyForSlot(slotKey);
 }
 
 function ensureLockBinding(profile) {
-    if (modeForSlot(profile.slotKey) !== "Windows") {
-        profile.bindings[HARDWARE_LOCK_KEY] = HARDWARE_LOCK_VALUE;
-    }
+    profile.bindings[lockKeyForSlot(profile.slotKey)] = HARDWARE_LOCK_VALUE;
 }
 
 // ============================================================================
@@ -153,6 +165,7 @@ function renderKeyboard() {
             input.className = "inline-edit";
             input.value = activeProfile().bindings[keyId] || "";
             input.addEventListener("input", (e) => {
+                ensureActiveProfileEditable();
                 const val = e.target.value;
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
@@ -315,6 +328,7 @@ function buildCenterContent() {
             nameInput.maxLength = MAX_PROFILE_NAME_LENGTH;
             nameInput.setAttribute("aria-label", "Profile name");
             nameInput.addEventListener("input", (e) => {
+                ensureActiveProfileEditable();
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
                     state.userProfiles[ak].name = e.target.value;
@@ -328,6 +342,7 @@ function buildCenterContent() {
             descInput.maxLength = MAX_DESCRIPTION_LENGTH;
             descInput.setAttribute("aria-label", "Profile description");
             descInput.addEventListener("input", (e) => {
+                ensureActiveProfileEditable();
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
                     state.userProfiles[ak].description = e.target.value;
@@ -558,6 +573,7 @@ function renderMenu() {
             }
             if (!isLockedKey) {
                 addMenuItem(menu, "Remove value", () => {
+                ensureActiveProfileEditable();
                 const ak = state.activeProfileKey;
                 if (ak && state.userProfiles[ak]) {
                     delete state.userProfiles[ak].bindings[keyId];
@@ -911,7 +927,7 @@ function renderCollage() {
     addBtn.className = "collage-add-btn";
     addBtn.textContent = "+ Add page";
     addBtn.addEventListener("click", () => {
-        const page = createPage(generateId(), "", "");
+        const page = createPage(generateId("page_"), "", "");
         state.viewingPage = { page, slotKey: act.slotKey, editing: true, isNew: true };
         renderPageViewer();
     });
@@ -1361,7 +1377,7 @@ async function handlePageImageUpload(e, vp) {
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
         try {
-            const imgId = generateId();
+            const imgId = generateId("img_");
             await putImage(db, imgId, file);
             const url = URL.createObjectURL(file);
             state.imageUrls[imgId] = url;
@@ -1591,8 +1607,12 @@ function confirmAction(action) {
         }
         scheduleAutosave();
     } else if (action.type === "ClearBindings") {
-        if (state.userProfiles[action.slotKey]) {
+        if (state.userProfiles[action.slotKey] || presetProfiles[action.slotKey]) {
             const slotKey = action.slotKey;
+            // Promote if it's still a preset
+            if (!state.userProfiles[slotKey]) {
+                state.userProfiles[slotKey] = JSON.parse(JSON.stringify(presetProfiles[slotKey]));
+            }
             state.userProfiles[slotKey].bindings = {};
             // Always preserve the hardware lock on clear
             ensureLockBinding(state.userProfiles[slotKey]);
@@ -1623,12 +1643,12 @@ function confirmAction(action) {
 
 // ── Image handling ──
 
-function generateId() {
+function generateId(prefix = "") {
     try {
         return crypto.randomUUID();
     } catch (_) {
         // Fallback for environments where crypto.randomUUID() isn't available
-        return "img_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
+        return prefix + Date.now() + "_" + Math.random().toString(36).slice(2, 10);
     }
 }
 
@@ -1732,7 +1752,8 @@ async function handleImportBindings(e) {
         const data = new Uint8Array(buf);
         const bindings = importBindings(data);
         let count = 0;
-        if (state.userProfiles[ak]) {
+        if (state.userProfiles[ak] || presetProfiles[ak]) {
+            ensureActiveProfileEditable();
             for (const [k, v] of Object.entries(bindings)) {
                 if (v !== "") {
                     state.userProfiles[ak].bindings[k] = v;
@@ -1780,9 +1801,18 @@ async function doAutosave() {
     try {
         // Save pages
         await savePages(state.db, state.allPages);
-        // Only save profiles if they differ from compile-time defaults
-        if (!deepEqual(state.userProfiles, defaultsSnapshot)) {
-            await saveProfiles(state.db, state.userProfiles);
+        // Only persist custom-slot profiles — presets are always derived from
+        // the compile-time PRESET_BINDINGS in data.js on every page load.
+        const customOnly = {};
+        for (const [key, profile] of Object.entries(state.userProfiles)) {
+            if (slotIsCustom(key)) {
+                customOnly[key] = profile;
+            }
+        }
+        if (!deepEqual(customOnly, defaultsSnapshot)) {
+            await saveProfiles(state.db, customOnly);
+        } else if (Object.keys(customOnly).length === 0) {
+            await clearProfiles(state.db);
         }
     } catch (e) {
         console.warn("Autosave failed:", e);
@@ -1814,6 +1844,14 @@ async function init() {
 
     // Load profiles
     const profiles = await loadProfiles(db);
+    // Strip any stale preset-slot profiles that may have been saved
+    // (from before presets were made properly immutable via autosave filtering).
+    // Presets are always derived from the compile-time PRESET_BINDINGS in data.js.
+    for (const key of Object.keys(profiles)) {
+        if (!slotIsCustom(key)) {
+            delete profiles[key];
+        }
+    }
     const defaults = loadDefaultProfiles();
     if (Object.keys(profiles).length === 0 || deepEqual(profiles, defaults)) {
         if (Object.keys(profiles).length > 0) {

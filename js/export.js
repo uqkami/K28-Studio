@@ -26,8 +26,8 @@ async function exportProfiles(db, profiles, pages) {
 
     const zip = new JSZip();
 
-    // Write manifest.json
-    zip.file("manifest.json", JSON.stringify(cleaned, null, 2));
+    // Write manifest.json (sorted by key)
+    zip.file("manifest.json", JSON.stringify(sortKeys(cleaned, true), null, 2));
 
     // Write pages.json
     if (pages && Object.keys(pages).length > 0) {
@@ -66,7 +66,8 @@ async function exportProfiles(db, profiles, pages) {
 // ── Export single bindings ──
 
 function exportBindings(profile) {
-    const json = JSON.stringify(profile.bindings, null, 2);
+    const sorted = sortKeys(profile.bindings);
+    const json = JSON.stringify(sorted, null, 2);
     const filename = profile.slotKey + "_" + profile.name.replace(/[^a-zA-Z0-9_-]/g, "_") + ".k28binding";
     downloadBlob(new Blob([json], { type: "application/json" }), filename);
 }
@@ -151,6 +152,19 @@ async function importProfiles(db, data) {
 }
 
 // ── Helpers ──
+
+function sortKeys(obj, deep) {
+    if (obj === null || typeof obj !== "object") return obj;
+    if (Array.isArray(obj)) return obj.map(v => deep ? sortKeys(v, true) : v);
+    const sorted = {};
+    for (const key of Object.keys(obj).sort()) {
+        const val = obj[key];
+        sorted[key] = deep && typeof val === "object" && val !== null && !Array.isArray(val)
+            ? sortKeys(val, true)
+            : val;
+    }
+    return sorted;
+}
 
 function blobToArrayBuffer(blob) {
     return new Promise((resolve, reject) => {
